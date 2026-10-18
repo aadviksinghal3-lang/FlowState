@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a111d">
+  <title>Flowstate | Smart Traffic Flow Optimizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800&family=Rajdhani:wght@600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1>FLOWSTATE</h1>
+        <p>Less Waiting. Better Flow.</p>
+      </div>
+      <div class="live-indicator"><span class="live-dot"></span><span id="run-status">LIVE</span></div>
+    </header>
+    <div class="completion-banner" id="completion-banner" role="status" hidden>
+      SIMULATION COMPLETE PRESS NEW RUN TO START THE SIMULATION AGAIN
+    </div>
+
+    <section class="toolbar" aria-label="Simulation controls">
+      <div class="toolbar-group">
+        <button class="control-button scenario-button" id="scenario-button">SCENARIO&nbsp; MORNING RUSH</button>
+        <button class="control-button demand-button" id="demand-button">DEMAND&nbsp; MEDIUM</button>
+      </div>
+      <div class="toolbar-group toolbar-actions">
+        <button class="control-button" id="auth-button" aria-pressed="true">AUTH ON</button>
+        <button class="control-button primary-button" id="emergency-button">EMERGENCY</button>
+        <button class="control-button" id="speed-button">1× SPEED</button>
+        <button class="control-button start-button" id="start-button">START</button>
+        <button class="control-button" id="new-run-button">NEW RUN</button>
+        <button class="control-button" id="charts-button">CHARTS</button>
+        <button class="control-button" id="pause-button">PAUSE</button>
+      </div>
+    </section>
+    <p class="scenario-description" id="scenario-description">20-car E-W opening surge · North-south commuter flow</p>
+
+    <section class="comparison" aria-label="Live controller comparison">
+      <article class="system-card" id="fixed-card">
+        <div class="card-heading">
+          <div class="heading-mark fixed-mark"></div>
+          <div class="heading-copy">
+            <h2>FIXED TIMER</h2>
+            <p>60s opposing red (incl. 3s yellow)</p>
+          </div>
+          <div class="signal-badge" id="fixed-badge"><span class="status-light"></span><span>N-S GREEN</span></div>
+        </div>
+        <div class="approach-stats" id="fixed-stats"></div>
+        <div class="intersection" id="fixed-intersection" aria-label="Fixed timer intersection"></div>
+        <div class="system-status" id="fixed-status"></div>
+        <p class="decision-line"><b>DECISION</b><span id="fixed-decision">Fixed schedule: 60 seconds of opposing red, including yellow clearance.</span></p>
+        <div class="metric-grid">
+          <div class="metric-tile"><span>CLEARED</span><strong id="fixed-cleared">0</strong></div>
+          <div class="metric-tile"><span>MEAN WAIT</span><strong id="fixed-wait">0.0s</strong></div>
+          <div class="metric-tile"><span>QUEUE</span><strong id="fixed-queue">0 cars / 0m</strong></div>
+          <div class="metric-tile"><span>EMERGENCY WAIT</span><strong id="fixed-emergency-wait">--</strong></div>
+        </div>
+        <div class="progress-track"><span id="fixed-progress"></span></div>
+        <footer class="card-footer"><span id="fixed-time">00:00 / 03:30</span><span id="fixed-summary"></span></footer>
+      </article>
+
+      <article class="system-card" id="adaptive-card">
+        <div class="card-heading">
+          <div class="heading-mark adaptive-mark"></div>
+          <div class="heading-copy">
+            <h2>ADAPTIVE CONTROL</h2>
+            <p>10s before normal switching · persistent queue check</p>
+          </div>
+          <div class="signal-badge" id="adaptive-badge"><span class="status-light"></span><span>NO DEMAND</span></div>
+        </div>
+        <div class="approach-stats" id="adaptive-stats"></div>
+        <div class="intersection" id="adaptive-intersection" aria-label="Adaptive intersection"></div>
+        <div class="system-status" id="adaptive-status"></div>
+        <p class="decision-line"><b>DECISION</b><span id="adaptive-decision">Waiting for vehicles.</span></p>
+        <div class="metric-grid">
+          <div class="metric-tile"><span>CLEARED</span><strong id="adaptive-cleared">0</strong></div>
+          <div class="metric-tile"><span>MEAN WAIT</span><strong id="adaptive-wait">0.0s</strong></div>
+          <div class="metric-tile"><span>QUEUE</span><strong id="adaptive-queue">0 cars / 0m</strong></div>
+          <div class="metric-tile"><span>EMERGENCY WAIT</span><strong id="adaptive-emergency-wait">--</strong></div>
+        </div>
+        <div class="progress-track"><span id="adaptive-progress"></span></div>
+        <footer class="card-footer"><span id="adaptive-time">00:00 / 03:30</span><span id="adaptive-summary"></span></footer>
+      </article>
+    </section>
+
+    <div class="bottom-bar">
+      <span>SPACE pause&nbsp; | &nbsp;R new run&nbsp; | &nbsp;Click scenario / demand to change flow</span>
+      <span id="run-meta">REF 34G / 84R / 200m&nbsp; | &nbsp;SEED 17</span>
+    </div>
+  </main>
+
+  <div class="modal-backdrop hidden" id="charts-modal" role="dialog" aria-modal="true" aria-labelledby="charts-title">
+    <section class="charts-dialog">
+      <button class="close-button" id="close-charts" aria-label="Close charts">×</button>
+      <h2 id="charts-title">LIVE SYSTEM COMPARISON</h2>
+      <p class="charts-subtitle">Live results from this run; mean wait includes vehicles still queued</p>
+      <div class="charts-grid">
+        <section class="chart-card">
+          <h3>VEHICLES CLEARED</h3>
+          <div class="bar-chart" id="cleared-chart"></div>
+        </section>
+        <section class="chart-card">
+          <h3>AVERAGE WAIT</h3>
+          <div class="bar-chart" id="wait-chart"></div>
+          <p class="chart-result" id="wait-result">WAIT: TIED</p>
+        </section>
+      </div>
+    </section>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
