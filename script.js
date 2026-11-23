@@ -2,12 +2,12 @@
 
 (() => {
   const DIRECTIONS = ["N", "E", "S", "W"];
-  const PHASES = ["NS", "EW"];
-  const PHASE_DIRS = { NS: ["N", "S"], EW: ["E", "W"] };
+  const PHASES = ["N", "E", "S", "W"]; // one signal per road, served one at a time
+  const PHASE_DIRS = { N: ["N"], E: ["E"], S: ["S"], W: ["W"] };
   const SIM_DURATION = 210;
   const YELLOW_SECONDS = 3;
   const FIXED_RED_SECONDS = 60;
-  const FIXED_GREEN = FIXED_RED_SECONDS - YELLOW_SECONDS;
+  const FIXED_GREEN = FIXED_RED_SECONDS / (PHASES.length - 1) - YELLOW_SECONDS; // 17s: each road is red for the other three roads' 20s slots
   const OPENING_EW_SURGE_VEHICLES = 20;
   const ADAPTIVE_MIN_GREEN = 6;
   const ADAPTIVE_NORMAL_SWITCH_GREEN = 10;
@@ -18,15 +18,53 @@
   const HEAVY_QUEUE_THRESHOLD = 10;
   const HEAVY_QUEUE_RATIO = 2;
   const CROSS_SECONDS = 2.2;
+  const DISCHARGE_HEADWAY = 1.1;          // seconds between cars released from the same road on green
+  const BURST_FIRST_TIME = 10;            // platoon bursts make queues visibly jump while a road is red
+  const BURST_GAP_MIN = 14;
+  const BURST_GAP_MAX = 24;
+  const BURST_SIZE_MIN = 5;
+  const BURST_SIZE_MAX = 9;
+  const LEFT_TURN_SHARE = 0.2;
+  const RIGHT_TURN_SHARE = 0.2;
+  const CYCLE_GREEN_BUDGET = 60;          // total green seconds shared by all roads in one cycle
+  const CYCLE_MIN_GREEN = 10;              // every road with cars gets at least this much green (or less if it needs less)
+  const CYCLE_LOOKAHEAD = 10;             // seconds of expected arrivals added to a road's current queue
+  const CYCLE_START_UP = 2;               // start-up loss at the beginning of a green
+  const CYCLE_EXTEND_STEP = 12;            // extend a busy road's green in steps like 20s -> 25s
+  const CYCLE_EXTEND_MIN_CARS = 1;        // a green is only extended if at least this many cars are still waiting
+  const CYCLE_ORDER_BY_NEED = 1;          // 1 = serve the road with the biggest planned green first, 0 = N,E,S,W rotation
+  const CYCLE_GAP_OUT_AFTER = 2;          // an emptied road ends its green early after this many seconds
+  const CYCLE_EMERGENCY_GREEN = 8;
+  const PREEMPT_MIN_GAP = 30;             // another road must have this many more cars...
+  const PREEMPT_RATIO = 3;                // ...and at least this multiple of the green road's queue
+  const PREEMPT_PERSIST = 1;              // ...for this many seconds before the green is cut short
+  const EMPTY_STAT = { count: 0, wait: 0, max: 0, pressure: 0, rate: 0, predicted: 0 };
+  // Vehicle paths in % of the intersection box. Each road has its own lane; cars drive on the right.
+  const LANE_START = { N: [46, 27], S: [54, 71], W: [37, 54], E: [63, 46] };
+  const LANE_END = { N: [46, 100], S: [54, 0], W: [100, 54], E: [0, 46] };
+  const TURN_PATHS = {
+    N: { right: { at: [46, 46], to: [0, 46] }, left: { at: [46, 54], to: [100, 54] } },
+    S: { right: { at: [54, 54], to: [100, 54] }, left: { at: [54, 46], to: [0, 46] } },
+    W: { right: { at: [46, 54], to: [46, 100] }, left: { at: [54, 54], to: [54, 0] } },
+    E: { right: { at: [54, 46], to: [54, 0] }, left: { at: [46, 46], to: [46, 100] } },
+  };
+  const ADAPTIVE_FAIRNESS_WAIT = 60;      // any vehicle waiting this long wins the next safe switch (45 tested slightly worse)
+  const RATE_WINDOW = 10;                 // seconds of recent arrivals used to estimate inflow
+  const PREDICT_HORIZON = 6;              // look-ahead (s) for expected new arrivals
+  const PREDICT_WEIGHT = 2;               // pressure points per expected arriving car
+  const PRESSURE_SWITCH_MARGIN = 6;       // other phase must beat current by this much (= 3 cars) to justify a 3s yellow
+  const GREEN_PER_VEHICLE = 1.1;          // approx seconds of green needed to discharge one queued car
+  const DYNAMIC_GREEN_BASE = 4;           // buffer added to demand-based green
+  const DYNAMIC_MIN_GREEN = 30;     // lower (e.g. 12) to let light traffic hand over green earlier; tested slightly worse
   const scenarios = [
     { name: "Morning rush", description: "North-south commuter flow", weights: [0.33, 0.16, 0.31, 0.20] },
     { name: "Balanced flow", description: "Balanced four-approach traffic flow", weights: [0.25, 0.25, 0.25, 0.25] },
     { name: "Event surge", description: "Event release with a short demand surge", weights: [0.22, 0.28, 0.22, 0.28] },
   ];
   const demands = [
-    { name: "Low", rate: 0.18 },
-    { name: "Medium", rate: 0.27 },
-    { name: "High", rate: 0.39 },
+    { name: "Low", rate: 0.10 },
+    { name: "Medium", rate: 0.16 },
+    { name: "High", rate: 0.24 },
   ];
   const $ = (id) => document.getElementById(id);
   let scenarioIndex = 0;
@@ -54,8 +92,14 @@
 
   function generateArrivals() {
     const random = seededRandom(seed);
+    const turnRandom = seededRandom(seed * 7919 + 13);
+    const pickTurn = () => {
+      const value = turnRandom();
+      return value < LEFT_TURN_SHARE ? "left" : value < LEFT_TURN_SHARE + RIGHT_TURN_SHARE ? "right" : "straight";
+    };
     const arrivals = Array.from({ length: OPENING_EW_SURGE_VEHICLES }, (_, index) => ({
       time: 0,
+      turn: pickTurn(),
       direction: index % 2 === 0 ? "E" : "W",
       id: `opening-ew-surge-${index}`,
     }));
@@ -65,9 +109,28 @@
       let time = -Math.log(Math.max(0.000001, random())) / (rate * scenario.weights[index] * 2.9);
       while (time < SIM_DURATION) {
         const surge = scenarioIndex === 2 && time > 50 && time < 125 ? 2.1 : 1;
-        arrivals.push({ time, direction: DIRECTIONS[index], id: `${index}-${arrivals.length}` });
+        arrivals.push({ time, turn: pickTurn(), direction: DIRECTIONS[index], id: `${index}-${arrivals.length}` });
         time += -Math.log(Math.max(0.000001, random())) / (rate * scenario.weights[index] * 2.9 * surge);
       }
+    }
+    // Platoon bursts: a group of cars reaches one road within a few seconds, shared by both controllers.
+    const burstRandom = seededRandom(seed * 104729 + 7);
+    let burstTime = BURST_FIRST_TIME;
+    while (burstTime < SIM_DURATION - 5) {
+      let pick = burstRandom();
+      let burstIndex = 0;
+      for (let index = 0; index < DIRECTIONS.length; index += 1) {
+        pick -= scenario.weights[index];
+        if (pick <= 0) { burstIndex = index; break; }
+        burstIndex = index;
+      }
+      const size = BURST_SIZE_MIN + Math.floor(burstRandom() * (BURST_SIZE_MAX - BURST_SIZE_MIN + 1));
+      let carTime = burstTime;
+      for (let car = 0; car < size; car += 1) {
+        arrivals.push({ time: carTime, turn: pickTurn(), direction: DIRECTIONS[burstIndex], id: `burst-${burstIndex}-${arrivals.length}` });
+        carTime += 0.25 + burstRandom() * 0.45;
+      }
+      burstTime += BURST_GAP_MIN + burstRandom() * (BURST_GAP_MAX - BURST_GAP_MIN);
     }
     arrivals.sort((a, b) => a.time - b.time || a.direction.localeCompare(b.direction));
     return arrivals;
@@ -83,7 +146,7 @@
       served: 0,
       completedWaits: [],
       maxQueue: 0,
-      phase: kind === "fixed" ? "NS" : null,
+      phase: kind === "fixed" ? PHASES[0] : null,
       stage: kind === "fixed" ? "green" : "no-demand",
       remaining: kind === "fixed" ? FIXED_GREEN : 0,
       signalChangeAt: kind === "fixed" ? 0 : null,
@@ -92,8 +155,15 @@
       greenElapsed: 0,
       greenTarget: kind === "fixed" ? FIXED_GREEN : null,
       queueAdvantageChecks: 0,
+      plan: null,
+      extendedBy: 0,
+      plannedGreen: 0,
+      hop: false,
+      preemptTime: 0,
+      preemptions: 0,
+      arrivalLog: [],
       pendingPhase: null,
-      decision: kind === "fixed" ? "Fixed schedule: 60 seconds of opposing red, including yellow clearance." : "Waiting for vehicles.",
+      decision: kind === "fixed" ? "Fixed schedule: each road has its own signal: 17s green, 3s yellow, 60s red." : "Waiting for vehicles.",
       emergencyNotice: "",
       emergency: null,
       lastEmergencyWait: null,
@@ -128,9 +198,12 @@
   }
 
   function currentStats(run) {
-    const result = { NS: { count: 0, wait: 0, max: 0, pressure: 0 }, EW: { count: 0, wait: 0, max: 0, pressure: 0 } };
+    const result = Object.fromEntries(PHASES.map((phase) => [phase, { ...EMPTY_STAT }]));
+    const cutoff = run.time - RATE_WINDOW;
+    while (run.arrivalLog.length && run.arrivalLog[0].time < cutoff) run.arrivalLog.shift();
+    const window = Math.min(RATE_WINDOW, Math.max(run.time, 1));
     for (const direction of DIRECTIONS) {
-      const phase = direction === "N" || direction === "S" ? "NS" : "EW";
+      const phase = phaseFor(direction);
       for (const vehicle of run.queues[direction]) {
         const wait = Math.max(0, run.time - vehicle.arrival);
         result[phase].count += 1;
@@ -138,43 +211,18 @@
         result[phase].max = Math.max(result[phase].max, wait);
       }
     }
+    for (const entry of run.arrivalLog) result[entry.phase].rate += 1 / window;
     for (const phase of PHASES) {
       const stat = result[phase];
-      stat.pressure = stat.count ? 2 * stat.count + stat.wait / 30 : 0;
+      stat.predicted = stat.rate * PREDICT_HORIZON;
+      // Pressure = 2N + W/30 + expected arrivals in the next few seconds.
+      stat.pressure = stat.count ? 2 * stat.count + stat.wait / 30 + PREDICT_WEIGHT * stat.predicted : 0;
     }
     return result;
   }
 
-  function choosePhase(run, stats) {
-    if (run.emergency && run.emergency.authorized) {
-      return { phase: phaseFor(run.emergency.direction), reason: `Emergency request from ${run.emergency.direction}; priority selection.` };
-    }
-    const demanded = PHASES.filter((phase) => stats[phase].count > 0);
-    if (!demanded.length) return { phase: null, reason: "No demand on any approach." };
-    if (demanded.length === 1) return { phase: demanded[0], reason: `${demanded[0]} selected because the other phase has no demand.` };
-    const overdue = demanded.filter((phase) => stats[phase].max >= 60);
-    if (overdue.length) {
-      overdue.sort((a, b) => stats[b].max - stats[a].max || stats[b].pressure - stats[a].pressure || PHASES.indexOf(a) - PHASES.indexOf(b));
-      const phase = overdue[0];
-      return { phase, reason: `Fairness priority: ${phase} has the longest overdue wait (${stats[phase].max.toFixed(1)}s).` };
-    }
-    const ns = stats.NS;
-    const ew = stats.EW;
-    if (ns.count >= 2 * ew.count) return { phase: "NS", reason: `Larger queue priority: N-S has ${ns.count} vehicles versus E-W ${ew.count}.` };
-    if (ew.count >= 2 * ns.count) return { phase: "EW", reason: `Larger queue priority: E-W has ${ew.count} vehicles versus N-S ${ns.count}.` };
-    if (ns.pressure !== ew.pressure) {
-      const phase = ns.pressure > ew.pressure ? "NS" : "EW";
-      return { phase, reason: `${phase} selected for higher pressure (${stats[phase].pressure.toFixed(1)}).` };
-    }
-    if (ns.max !== ew.max) {
-      const phase = ns.max > ew.max ? "NS" : "EW";
-      return { phase, reason: `${phase} selected for longer maximum wait.` };
-    }
-    return { phase: "NS", reason: "Pressure and wait are tied; deterministic N-S tie-break." };
-  }
-
   function phaseFor(direction) {
-    return direction === "N" || direction === "S" ? "NS" : "EW";
+    return direction;
   }
 
   function startGreen(run, phase, reason, stats) {
@@ -207,6 +255,8 @@
     while (run.arrivalIndex < run.arrivals.length && run.arrivals[run.arrivalIndex].time <= run.time) {
       const arrival = run.arrivals[run.arrivalIndex++];
       run.queues[arrival.direction].push({ ...arrival, arrival: arrival.time, emergency: false });
+      // The shared opening surge is a one-off, so it is not treated as an ongoing inflow rate.
+      if (!String(arrival.id).startsWith("opening")) run.arrivalLog.push({ time: arrival.time, phase: phaseFor(arrival.direction) });
     }
   }
 
@@ -214,29 +264,69 @@
     if (run.stage !== "green" || !run.phase) return;
     for (const direction of PHASE_DIRS[run.phase]) {
       const queue = run.queues[direction];
-      if (queue.length && !run.moving.some((vehicle) => vehicle.direction === direction)) {
+      if (queue.length && !run.moving.some((vehicle) => vehicle.direction === direction && vehicle.moving < DISCHARGE_HEADWAY)) {
         const vehicle = queue.shift();
         vehicle.wait = Math.max(0, run.time - vehicle.arrival);
         run.completedWaits.push(vehicle.wait);
+        const profile = crossingProfile(run, direction, vehicle.turn || "straight");
         run.moving.push({
           ...vehicle,
           moving: 0,
-          crossingDuration: crossingDuration(run, direction),
+          crossingDuration: profile.duration,
+          box: profile.box,
         });
       }
     }
   }
 
-  function crossingDuration(run, direction) {
+  function vehiclePath(direction, turn) {
+    const start = LANE_START[direction];
+    if (turn === "left" || turn === "right") {
+      const route = TURN_PATHS[direction][turn];
+      return [start, route.at, route.to];
+    }
+    return [start, LANE_END[direction]];
+  }
+
+  function pathLength(points, width, height) {
+    let total = 0;
+    for (let i = 1; i < points.length; i += 1) {
+      total += Math.hypot((points[i][0] - points[i - 1][0]) * width / 100, (points[i][1] - points[i - 1][1]) * height / 100);
+    }
+    return total;
+  }
+
+  function pathPose(points, progress, box) {
+    const width = box ? box.w : 2;
+    const height = box ? box.h : 1;
+    const lengths = [];
+    for (let i = 1; i < points.length; i += 1) lengths.push(pathLength([points[i - 1], points[i]], width, height));
+    let remaining = progress * lengths.reduce((sum, value) => sum + value, 0);
+    let segment = 0;
+    while (segment < lengths.length - 1 && remaining > lengths[segment]) {
+      remaining -= lengths[segment];
+      segment += 1;
+    }
+    const [a, b] = [points[segment], points[segment + 1]];
+    const fraction = lengths[segment] ? Math.min(1, remaining / lengths[segment]) : 1;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const heading = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "east" : "west") : (dy > 0 ? "south" : "north");
+    return { left: a[0] + dx * fraction, top: a[1] + dy * fraction, heading, turned: segment > 0 };
+  }
+
+  function crossingProfile(run, direction, turn) {
     const intersection = $(`${run.kind}-intersection`);
-    if (typeof intersection.getBoundingClientRect !== "function") return CROSS_SECONDS;
-    const { width, height } = intersection.getBoundingClientRect();
-    if (!width || !height) return CROSS_SECONDS;
-    const vertical = direction === "N" || direction === "S";
-    const distance = vertical
-      ? height * (direction === "N" ? 0.73 : 0.71)
-      : width * 0.63;
-    return CROSS_SECONDS * distance / (width * 0.48);
+    let width = 0;
+    let height = 0;
+    if (typeof intersection.getBoundingClientRect === "function") ({ width, height } = intersection.getBoundingClientRect());
+    const known = Boolean(width && height);
+    const box = known ? { w: width, h: height } : { w: 2, h: 1 };
+    const straight = pathLength(vehiclePath(direction, "straight"), box.w, box.h);
+    const length = pathLength(vehiclePath(direction, turn), box.w, box.h);
+    const base = known ? CROSS_SECONDS * straight / (width * 0.48) : CROSS_SECONDS;
+    // Cap so a turning car always clears the junction within the 3s yellow.
+    return { box, duration: Math.min(base * length / straight, YELLOW_SECONDS - 0.2) };
   }
 
   function tickFixed(run, dt, stats) {
@@ -247,9 +337,9 @@
       run.signalChangeAt = run.time;
       run.stageChanges.push(run.time);
       run.remaining = YELLOW_SECONDS;
-      run.decision = `Fixed plan: ${run.phase} yellow clearance.`;
+      run.decision = `Fixed plan: ${run.phase} road yellow clearance.`;
     } else if (run.stage === "yellow" && run.remaining <= 0.000001) {
-      run.phase = run.phase === "NS" ? "EW" : "NS";
+      run.phase = PHASES[(PHASES.indexOf(run.phase) + 1) % PHASES.length];
       run.signalChangeAt = run.time;
       run.phaseChanges.push(run.time);
       run.stageChanges.push(run.time);
@@ -257,101 +347,226 @@
       run.remaining = FIXED_GREEN;
       run.greenTarget = FIXED_GREEN;
       run.greenElapsed = 0;
-      run.decision = `Fixed schedule: ${run.phase} active; opposing approaches remain red for 60 seconds.`;
+      run.decision = `Fixed schedule: ${run.phase} road is green; the other three roads stay red.`;
     }
   }
 
-  function tickAdaptive(run, dt, stats) {
-    if (run.stage === "no-demand") {
-      const selection = choosePhase(run, stats);
-      if (selection.phase) {
-        startGreen(run, selection.phase, selection.reason, stats);
-      }
-      else run.decision = selection.reason;
-      return;
+
+  // ---- Demand-based cycle planner ------------------------------------------------------------
+  // Each cycle the busy roads share at most 60 green seconds in proportion to their queues plus
+  // expected arrivals. Roads with no cars get no green. Busy roads can be extended in 5s steps
+  // (e.g. 20s -> 25s) from time that other roads did not need, and every road with cars still gets a turn.
+  function allocateGreens(order, need) {
+    const green = {};
+    let budget = CYCLE_GREEN_BUDGET;
+    for (const phase of order) {
+      green[phase] = Math.min(need[phase], CYCLE_MIN_GREEN);
+      budget -= green[phase];
     }
-    if (run.stage === "yellow") {
-      run.remaining = Math.max(0, run.remaining - dt);
-      if (run.remaining <= 0.000001) {
-        const selection = choosePhase(run, stats);
-        let target = run.pendingPhase;
-        if (run.emergency && selection.phase) target = selection.phase;
-        if (!target || !stats[target].count) target = selection.phase;
-        if (target) {
-          startGreen(run, target, run.decision, stats);
-        } else {
-          run.phase = null;
-          run.stage = "no-demand";
-          run.signalChangeAt = run.time;
-          run.stageChanges.push(run.time);
-          run.greenTarget = null;
-          run.decision = "No demand on any approach.";
-        }
-      }
-      return;
+    for (let pass = 0; pass < 6 && budget > 0.01; pass += 1) {
+      const unmet = order.map((phase) => Math.max(0, need[phase] - green[phase]));
+      const totalUnmet = unmet.reduce((sum, value) => sum + value, 0);
+      if (totalUnmet <= 0.01) break;
+      const pool = budget;
+      order.forEach((phase, index) => {
+        const give = Math.min(unmet[index], pool * unmet[index] / totalUnmet);
+        green[phase] += give;
+        budget -= give;
+      });
     }
-    const anyQueuedDemand = PHASES.some((phase) => stats[phase].count > 0);
-    if (!anyQueuedDemand && run.moving.length === 0) {
+    for (const phase of order) green[phase] = Math.max(4, Math.floor(green[phase]));
+    return green;
+  }
+
+  function makePlan(stats, afterPhase, firstPhase) {
+    const start = firstPhase ? PHASES.indexOf(firstPhase) : afterPhase ? (PHASES.indexOf(afterPhase) + 1) % PHASES.length : 0;
+    const order = PHASES.map((_, i) => PHASES[(start + i) % PHASES.length]).filter((phase) => stats[phase].count > 0);
+    const need = {};
+    for (const phase of order) need[phase] = GREEN_PER_VEHICLE * (stats[phase].count + stats[phase].rate * CYCLE_LOOKAHEAD) + CYCLE_START_UP;
+    if (CYCLE_ORDER_BY_NEED) {
+      const head = firstPhase ? order.splice(0, 1) : [];
+      order.sort((a, b) => need[b] - need[a]);
+      order.unshift(...head);
+    }
+    return { order, greens: allocateGreens(order, need), index: 0 };
+  }
+
+  const planTotal = (plan) => plan.order.reduce((sum, phase) => sum + plan.greens[phase], 0);
+
+  function nextPlanned(run, stats, afterPhase) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (!run.plan || run.plan.index >= run.plan.order.length) run.plan = makePlan(stats, afterPhase);
+      while (run.plan.index < run.plan.order.length) {
+        const phase = run.plan.order[run.plan.index];
+        if (stats[phase].count > 0) return phase;
+        run.plan.greens[phase] = 0; // empty road: no green, its time goes back to the shared pool
+        run.plan.index += 1;
+      }
+    }
+    return null;
+  }
+
+  function planText(plan) {
+    const parts = PHASES.map((phase) => (plan.order.includes(phase) && plan.greens[phase] > 0 ? `${phase} ${plan.greens[phase]}s` : `${phase} skipped`));
+    return `${parts.join(" · ")} (${planTotal(plan)}/${CYCLE_GREEN_BUDGET}s)`;
+  }
+
+  function startCycleGreen(run, phase, stats, reason, hop) {
+    startGreen(run, phase, reason, stats);
+    run.hop = hop;
+    run.extendedBy = 0;
+    const seconds = hop ? CYCLE_EMERGENCY_GREEN : run.plan.greens[phase];
+    run.plannedGreen = seconds;
+    run.greenTarget = seconds;
+    run.remaining = seconds;
+    if (!hop) run.decision = `${reason} ${phase} gets ${seconds}s green.`;
+  }
+
+  function cycleRedTime(run, stats, target) {
+    if (run.stage === "no-demand" || !run.plan || stats[target].count === 0) return null;
+    const plan = run.plan;
+    let time = run.stage === "green" ? run.remaining + YELLOW_SECONDS : run.remaining;
+    const upcoming = plan.order.slice(run.stage === "green" ? plan.index + 1 : plan.index).filter((phase) => stats[phase].count > 0);
+    for (const phase of upcoming) {
+      if (phase === target) return time;
+      time += plan.greens[phase] + YELLOW_SECONDS;
+    }
+    const last = plan.order[plan.order.length - 1] || run.phase;
+    const next = makePlan(stats, last);
+    for (const phase of next.order) {
+      if (phase === target) return time;
+      time += next.greens[phase] + YELLOW_SECONDS;
+    }
+    return time;
+  }
+
+  function tickCycle(run, dt, stats) {
+    const idle = () => {
       run.phase = null;
       run.stage = "no-demand";
       run.remaining = 0;
       run.greenTarget = null;
+      run.plan = null;
       run.signalChangeAt = run.time;
       run.stageChanges.push(run.time);
-      run.decision = "No demand on any approach; signal is idle.";
+      run.decision = "No cars on any road; signals idle and no green given.";
+    };
+    if (run.stage === "no-demand") {
+      const first = nextPlanned(run, stats, null);
+      if (first) startCycleGreen(run, first, stats, `Cycle plan: ${planText(run.plan)}.`, false);
+      return;
+    }
+    if (run.stage === "yellow") {
+      // An authorized emergency request that arrives during a yellow takes the next green.
+      const urgent = run.emergency && run.emergency.authorized ? phaseFor(run.emergency.direction) : null;
+      if (urgent && urgent !== run.pendingPhase && !run.hop) {
+        run.pendingPhase = urgent;
+        run.hop = true;
+        run.decision = `Emergency request from ${urgent}; it gets the next green.`;
+      }
+      run.remaining = Math.max(0, run.remaining - dt);
+      if (run.remaining > 0.000001) return;
+      if (run.pendingPhase && run.hop) {
+        startCycleGreen(run, run.pendingPhase, stats, "Emergency priority green.", true);
+        return;
+      }
+      const target = nextPlanned(run, stats, run.phase);
+      if (target) startCycleGreen(run, target, stats, run.plan.index === 0 ? `New cycle plan: ${planText(run.plan)}.` : `Next in cycle (${planTotal(run.plan)}/${CYCLE_GREEN_BUDGET}s).`, false);
+      else idle();
+      return;
+    }
+    if (!PHASES.some((phase) => stats[phase].count > 0) && run.moving.length === 0) {
+      idle();
       return;
     }
     run.greenElapsed += dt;
-    run.remaining = Math.max(0, run.greenTarget - run.greenElapsed);
+    run.remaining = Math.max(0, run.remaining - dt);
     const current = run.phase;
-    const other = current === "NS" ? "EW" : "NS";
-    const currentStat = stats[current];
-    const otherStat = stats[other];
-    const emptyCurrentSwitch = currentStat.count === 0 && otherStat.count > 0;
-    const normalSwitchEligible = run.greenElapsed >= ADAPTIVE_NORMAL_SWITCH_GREEN;
-    const queueAdvantage = otherStat.count - currentStat.count >= QUEUE_SWITCH_DIFFERENCE;
-    run.queueAdvantageChecks = normalSwitchEligible && queueAdvantage
-      ? run.queueAdvantageChecks + 1
-      : 0;
-    const largeQueueSwitch = normalSwitchEligible
-      && run.queueAdvantageChecks >= QUEUE_SWITCH_CONFIRMATIONS;
-    const emergencySwitch = run.emergency && run.emergency.authorized && phaseFor(run.emergency.direction) === other;
-    const fairnessSwitch = normalSwitchEligible && otherStat.max >= 60;
-    const heavyTraffic = currentStat.count >= HEAVY_QUEUE_THRESHOLD
-      && currentStat.count >= HEAVY_QUEUE_RATIO * otherStat.count;
-    const maximumGreen = heavyTraffic ? ADAPTIVE_HEAVY_MAX_GREEN : ADAPTIVE_MAX_GREEN;
-    const maximumReached = run.greenElapsed >= maximumGreen;
-    const maximumSwitch = maximumReached && otherStat.count > 0;
-    if (!(emptyCurrentSwitch || largeQueueSwitch || emergencySwitch || fairnessSwitch || maximumSwitch)) {
-      if (run.greenElapsed >= ADAPTIVE_MAX_GREEN && otherStat.count === 0 && currentStat.count > 0) {
-        run.decision = `${other} has no demand; extending ${current} green to keep serving its waiting queue.`;
-        run.greenTarget = null;
-        run.remaining = 0;
-      } else if (run.greenElapsed >= ADAPTIVE_MAX_GREEN && heavyTraffic && otherStat.count > 0) {
-        run.decision = `Heavy traffic on ${current}: extending green up to ${ADAPTIVE_HEAVY_MAX_GREEN}s while monitoring ${other} demand.`;
-        run.greenTarget = ADAPTIVE_HEAVY_MAX_GREEN;
-        run.remaining = Math.max(0, run.greenTarget - run.greenElapsed);
-      }
-      return;
-    }
-
-    let selection = choosePhase(run, stats);
-    if (emergencySwitch) selection = { phase: other, reason: `Authorized emergency from ${run.emergency.direction}; safe yellow clearance started.` };
-    else if (emptyCurrentSwitch) selection = { phase: other, reason: `Current phase is empty; switching to waiting ${other} traffic.` };
-    else if (fairnessSwitch) selection = { phase: other, reason: `Fairness priority: ${other} has waited ${otherStat.max.toFixed(1)}s; switching to prevent starvation.` };
-    else if (largeQueueSwitch) selection = { phase: other, reason: `Queue advantage held for ${QUEUE_SWITCH_CONFIRMATIONS} consecutive checks: ${other} has ${otherStat.count - currentStat.count} more vehicles.` };
-    else if (maximumSwitch) selection = { phase: other, reason: heavyTraffic
-      ? `Heavy-traffic 60s limit reached; switching to waiting ${other} traffic.`
-      : `Normal 30s maximum reached; switching to waiting ${other} traffic.` };
-
-    if (selection.phase && selection.phase !== current) {
+    const plan = run.plan;
+    const emergencyPhase = run.emergency && run.emergency.authorized ? phaseFor(run.emergency.direction) : null;
+    const beginYellow = (target, hop, reason) => {
       run.stage = "yellow";
       run.signalChangeAt = run.time;
       run.stageChanges.push(run.time);
       run.remaining = YELLOW_SECONDS;
-      run.pendingPhase = selection.phase;
-      run.decision = selection.reason;
+      run.pendingPhase = target;
+      run.hop = hop;
+      run.decision = reason;
+    };
+    if (emergencyPhase === current) {
+      run.emergency = null;
+      run.remaining = Math.max(run.remaining, 3);
+      run.decision = `Emergency vehicle is on the green road (${current}); keeping green until it clears.`;
+      return;
     }
+    if (emergencyPhase && !run.hop && run.greenElapsed >= ADAPTIVE_MIN_GREEN) {
+      beginYellow(emergencyPhase, true, `Emergency request from ${emergencyPhase}; ending ${current} green after yellow.`);
+      return;
+    }
+    if (run.hop) {
+      if (run.remaining <= 0.000001) {
+        const resume = nextPlanned(run, stats, current);
+        if (resume && resume !== current) beginYellow(resume, false, `Emergency done; resuming cycle with ${resume}.`);
+        else if (!resume) idle();
+        else startCycleGreen(run, current, stats, "Emergency done; continuing.", false);
+      }
+      return;
+    }
+    const cars = stats[current].count;
+    // Preemption: if another road has far more cars, cut this green short (yellow first) even though
+    // some cars here are still waiting. They stay in the queue and get a turn in the new cycle.
+    let rival = null;
+    if (run.greenElapsed >= ADAPTIVE_MIN_GREEN) {
+      for (const phase of PHASES) {
+        if (phase === current) continue;
+        const count = stats[phase].count;
+        if (count - cars >= PREEMPT_MIN_GAP && count >= PREEMPT_RATIO * cars && (!rival || count > stats[rival].count)) rival = phase;
+      }
+    }
+    run.preemptTime = rival ? run.preemptTime + dt : 0;
+    if (rival && run.preemptTime >= PREEMPT_PERSIST) {
+      run.preemptTime = 0;
+      run.preemptions += 1;
+      plan.greens[current] = Math.max(1, Math.round(run.greenElapsed));
+      run.plan = makePlan(stats, current, rival);
+      beginYellow(rival, false, `${rival} has ${stats[rival].count} cars vs ${cars} on ${current}: ${current} green cut short (yellow, then ${rival} green) although ${current} is not clear.`);
+      return;
+    }
+    let finish = null;
+    if (cars === 0 && run.greenElapsed >= CYCLE_GAP_OUT_AFTER && run.remaining > 0) {
+      const saved = Math.round(run.remaining);
+      plan.greens[current] = Math.max(1, Math.round(run.greenElapsed));
+      finish = `${current} has no more cars: green ended early, ${saved}s returned to the other roads.`;
+    } else if (run.remaining <= 0.000001) {
+      const spare = CYCLE_GREEN_BUDGET - planTotal(plan);
+      if (cars >= CYCLE_EXTEND_MIN_CARS && spare >= 1) {
+        const extra = Math.min(CYCLE_EXTEND_STEP, Math.floor(spare));
+        const before = plan.greens[current];
+        plan.greens[current] += extra;
+        run.extendedBy += extra;
+        run.remaining += extra;
+        run.greenTarget = plan.greens[current];
+        const waiting = plan.order.slice(plan.index + 1).filter((phase) => stats[phase].count > 0);
+        run.decision = `${current} still has ${cars} cars: green extended ${before}s → ${plan.greens[current]}s (cycle ${planTotal(plan)}/${CYCLE_GREEN_BUDGET}s).${waiting.length ? ` Red time +${extra}s on ${waiting.join(", ")}.` : ""}`;
+        return;
+      }
+      finish = `${current} green finished (${plan.greens[current]}s planned).`;
+    }
+    if (!finish) return;
+    plan.index += 1;
+    const next = nextPlanned(run, stats, current);
+    if (!next) return; // nothing waiting: the idle check above ends the green once crossings finish
+    if (next === current) {
+      // Only this road has cars: start its next cycle without a pointless yellow.
+      run.greenElapsed = 0;
+      run.extendedBy = 0;
+      run.plannedGreen = plan.greens[current];
+      run.greenTarget = run.plannedGreen;
+      run.remaining = run.plannedGreen;
+      run.decision = `${finish} No other road has cars, so ${current} continues for ${run.plannedGreen}s.`;
+      return;
+    }
+    beginYellow(next, false, `${finish} Next: ${next}.`);
   }
 
   function updateRun(run, dt) {
@@ -363,7 +578,7 @@
       arrive(run);
       const stats = currentStats(run);
       if (run.kind === "fixed") tickFixed(run, step, stats);
-      else tickAdaptive(run, step, stats);
+      else tickCycle(run, step, stats);
       serve(run, step);
       for (const vehicle of run.moving) vehicle.moving += step;
       const completed = run.moving.filter((vehicle) => vehicle.moving >= (vehicle.crossingDuration || CROSS_SECONDS));
@@ -403,6 +618,7 @@
   }
 
   function renderIntersection(run, root) {
+    const stats = run.kind === "adaptive" ? currentStats(run) : null;
     root.replaceChildren();
     const landscape = document.createElement("div");
     landscape.className = "landscape";
@@ -456,16 +672,21 @@
       const countdown = document.createElement("span");
       const signalPhase = phaseFor(direction);
       if (run.kind === "fixed" && run.stage !== "no-demand" && signalPhase !== run.phase) {
+        const slotsAhead = (PHASES.indexOf(signalPhase) - PHASES.indexOf(run.phase) + PHASES.length) % PHASES.length - 1;
+        const untilGreen = (run.stage === "green" ? run.remaining + YELLOW_SECONDS : run.remaining)
+          + slotsAhead * (FIXED_GREEN + YELLOW_SECONDS);
         countdown.className = "signal-countdown red";
-        countdown.textContent = `RED ${(
-          run.stage === "green" ? run.remaining + YELLOW_SECONDS : run.remaining
-        ).toFixed(1)}s`;
+        countdown.textContent = `RED ${untilGreen.toFixed(1)}s`;
+      } else if (run.kind === "adaptive" && run.stage !== "no-demand" && signalPhase !== run.phase) {
+        const until = cycleRedTime(run, stats, signalPhase);
+        countdown.className = "signal-countdown red";
+        countdown.textContent = until === null ? "RED NO CARS" : `RED ${until.toFixed(1)}s`;
       } else if (signalPhase === run.phase && run.stage !== "no-demand") {
         countdown.className = `signal-countdown ${run.stage}`;
         countdown.textContent = run.stage === "yellow"
           ? `${run.remaining.toFixed(1)}s`
-          : run.greenTarget === null
-            ? "EXT"
+          : run.kind === "adaptive"
+            ? `GREEN ${run.remaining.toFixed(1)}s${run.extendedBy ? ` (+${run.extendedBy})` : ""}`
             : `${run.remaining.toFixed(1)}s`;
       } else {
         countdown.className = `signal-countdown ${run.stage}`;
@@ -489,9 +710,17 @@
     run.moving.forEach((vehicle) => activeVehicles.push({ direction: vehicle.direction, index: 0, vehicle, moving: true }));
     activeVehicles.forEach(({ direction, index, vehicle, moving: isMoving }) => {
       const car = document.createElement("span");
-      const vertical = direction === "N" || direction === "S";
-      const heading = { N: "south", S: "north", W: "east", E: "west" }[direction];
-      car.className = `car heading-${heading} ${vertical ? "vertical" : ""} ${vehicle.emergency ? "emergency" : ""}`;
+      const turn = vehicle.turn || "straight";
+      let heading = { N: "south", S: "north", W: "east", E: "west" }[direction];
+      let pose = null;
+      if (isMoving) {
+        const progress = Math.min(1, vehicle.moving / (vehicle.crossingDuration || CROSS_SECONDS));
+        pose = pathPose(vehiclePath(direction, turn), progress, vehicle.box);
+        heading = pose.heading;
+      }
+      const vertical = heading === "north" || heading === "south";
+      const showTurnLamp = turn !== "straight" && !(pose && pose.turned);
+      car.className = `car heading-${heading} ${vertical ? "vertical" : ""} ${vehicle.emergency ? "emergency" : ""}${showTurnLamp ? ` turn-${turn}` : ""}`;
       const window = document.createElement("span");
       window.className = "car-window";
       const headlights = document.createElement("span");
@@ -499,7 +728,12 @@
       const taillights = document.createElement("span");
       taillights.className = "car-lights taillights";
       car.append(window, headlights, taillights);
-      placeCar(car, direction, index, vehicle, isMoving);
+      if (showTurnLamp) {
+        const turnLamp = document.createElement("span");
+        turnLamp.className = "car-turn";
+        car.append(turnLamp);
+      }
+      placeCar(car, direction, index, vehicle, isMoving, pose);
       root.append(car);
     });
     for (const direction of DIRECTIONS) {
@@ -526,7 +760,13 @@
     });
   }
 
-  function placeCar(car, direction, index, vehicle, moving) {
+  function placeCar(car, direction, index, vehicle, moving, pose) {
+    if (moving && pose) {
+      car.style.left = `${pose.left}%`;
+      car.style.top = `${pose.top}%`;
+      car.style.opacity = String(0.65 + 0.35 * Math.min(1, vehicle.moving / (vehicle.crossingDuration || CROSS_SECONDS)));
+      return;
+    }
     const progress = moving
       ? Math.min(1, vehicle.moving / (vehicle.crossingDuration || CROSS_SECONDS))
       : 0;
@@ -553,7 +793,7 @@
   }
 
   function phaseLabel(run) {
-    return run.phase ? `${run.phase === "NS" ? "N-S" : "E-W"}` : "NO DEMAND";
+    return run.phase ? `${run.phase}` : "NO DEMAND";
   }
 
   function statusColor(run) {
@@ -568,18 +808,18 @@
     const card = $(`${prefix}-card`);
     const intersection = $(`${prefix}-intersection`);
     renderIntersection(run, intersection);
-    $(`${prefix}-stats`).innerHTML = `
-      <div class="approach-stat"><span>N-S P ${stats.NS.pressure.toFixed(1)} &nbsp; W ${stats.NS.wait.toFixed(0)}s &nbsp; M ${maxWait(run, "NS").toFixed(0)}s</span><strong>${stats.NS.count} cars</strong></div>
-      <div class="approach-stat"><span>E-W P ${stats.EW.pressure.toFixed(1)} &nbsp; W ${stats.EW.wait.toFixed(0)}s &nbsp; M ${maxWait(run, "EW").toFixed(0)}s</span><strong>${stats.EW.count} cars</strong></div>`;
+    $(`${prefix}-stats`).innerHTML = PHASES.map((phase) => {
+      const stat = stats[phase];
+      const signal = run.stage !== "no-demand" && run.phase === phase ? run.stage : "red";
+      return `<div class="approach-stat ${signal}"><span>${phase}</span><strong>${stat.count} cars</strong><em>P ${stat.pressure.toFixed(1)} · IN ${(stat.rate * 60).toFixed(0)}/m · M ${maxWait(run, phase).toFixed(0)}s</em></div>`;
+    }).join("");
     const badge = $(`${prefix}-badge`);
     badge.className = `signal-badge ${statusColor(run)}`;
     badge.querySelector("span:last-child").textContent = run.stage === "no-demand" ? "NO DEMAND" : `${phaseLabel(run)} ${run.stage.toUpperCase()}`;
     const status = $(`${prefix}-status`);
     status.className = `system-status ${statusColor(run)}`;
     status.textContent = run.stage === "green"
-      ? run.greenTarget === null
-        ? `${phaseLabel(run)} GREEN  |  ${run.greenElapsed.toFixed(1)}s ELAPSED  |  EXTENDED: OPPOSING PHASE HAS NO DEMAND`
-        : `${phaseLabel(run)} GREEN  |  ${run.greenElapsed.toFixed(1)}s ELAPSED  |  TARGET ${run.greenTarget}s`
+      ? `${phaseLabel(run)} GREEN  |  ${run.greenElapsed.toFixed(1)}s ELAPSED  |  TARGET ${Math.round(run.greenTarget)}s`
       : run.stage === "yellow"
         ? `${phaseLabel(run)} YELLOW CLEARANCE`
         : "NO DEMAND  |  Waiting for vehicles";
@@ -592,7 +832,7 @@
     $(`${prefix}-emergency-wait`).textContent = run.lastEmergencyWait === null ? "--" : `${run.lastEmergencyWait.toFixed(1)}s`;
     $(`${prefix}-progress`).style.width = `${Math.min(100, run.time / SIM_DURATION * 100)}%`;
     $(`${prefix}-time`).textContent = `${formatTime(run.time)} / 03:30`;
-    $(`${prefix}-summary`).textContent = `PEAK ${run.maxQueue} cars &nbsp; | &nbsp; N-S M ${maxWait(run, "NS").toFixed(0)}s &nbsp; E-W M ${maxWait(run, "EW").toFixed(0)}s`;
+    $(`${prefix}-summary`).textContent = `PEAK ${run.maxQueue} cars | MAX WAIT ${PHASES.map((phase) => `${phase} ${maxWait(run, phase).toFixed(0)}s`).join("  ")}`;
     card.dataset.stage = run.stage;
   }
 
@@ -602,7 +842,7 @@
     renderRun(runs.adaptive);
     $("run-status").textContent = completed ? "COMPLETE" : !hasStarted ? "READY" : paused ? "PAUSED" : "LIVE";
     $("completion-banner").hidden = !completed;
-    $("run-meta").textContent = `SHARED ARRIVALS / 210s &nbsp; | &nbsp; SEED ${seed}`;
+    $("run-meta").textContent = `SHARED ARRIVALS / 210s  |  SEED ${seed}`;
     if (chartOpen) drawCharts();
   }
 
@@ -649,8 +889,8 @@
   function updateStaticLabels() {
     $("scenario-button").innerHTML = `SCENARIO&nbsp; ${scenarios[scenarioIndex].name.toUpperCase()}`;
     $("demand-button").innerHTML = `DEMAND&nbsp; ${demands[demandIndex].name.toUpperCase()}`;
-    $("scenario-description").textContent = `20-car E-W opening surge · ${scenarios[scenarioIndex].description}`;
-    $("run-meta").textContent = `SHARED ARRIVALS / 210s &nbsp; | &nbsp; SEED ${seed}`;
+    $("scenario-description").textContent = `20-car E-W opening surge · platoon bursts · ${scenarios[scenarioIndex].description}`;
+    $("run-meta").textContent = `SHARED ARRIVALS / 210s  |  SEED ${seed}`;
   }
 
   function requestEmergency() {
