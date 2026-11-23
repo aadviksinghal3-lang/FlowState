@@ -46,14 +46,14 @@
           <div class="heading-mark fixed-mark"></div>
           <div class="heading-copy">
             <h2>FIXED TIMER</h2>
-            <p>60s opposing red (incl. 3s yellow)</p>
+            <p>4 separate signals · 17s green · 3s yellow · 60s red</p>
           </div>
-          <div class="signal-badge" id="fixed-badge"><span class="status-light"></span><span>N-S GREEN</span></div>
+          <div class="signal-badge" id="fixed-badge"><span class="status-light"></span><span>N GREEN</span></div>
         </div>
         <div class="approach-stats" id="fixed-stats"></div>
         <div class="intersection" id="fixed-intersection" aria-label="Fixed timer intersection"></div>
         <div class="system-status" id="fixed-status"></div>
-        <p class="decision-line"><b>DECISION</b><span id="fixed-decision">Fixed schedule: 60 seconds of opposing red, including yellow clearance.</span></p>
+        <p class="decision-line"><b>DECISION</b><span id="fixed-decision">Fixed schedule: each road has its own signal: 17s green, 3s yellow, 60s red.</span></p>
         <div class="metric-grid">
           <div class="metric-tile"><span>CLEARED</span><strong id="fixed-cleared">0</strong></div>
           <div class="metric-tile"><span>MEAN WAIT</span><strong id="fixed-wait">0.0s</strong></div>
@@ -69,7 +69,7 @@
           <div class="heading-mark adaptive-mark"></div>
           <div class="heading-copy">
             <h2>ADAPTIVE CONTROL</h2>
-            <p>10s before normal switching · persistent queue check</p>
+            <p>Green shared by queues · max 60s per cycle · empty roads skipped · +12s extensions</p>
           </div>
           <div class="signal-badge" id="adaptive-badge"><span class="status-light"></span><span>NO DEMAND</span></div>
         </div>
