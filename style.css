@@ -290,3 +290,22 @@ button { font: inherit; }
   .bar-wrap { width: 40px; }
   .modal-backdrop { padding: 10px; }
 }
+
+/* Four independent road signals and turning vehicles */
+.approach-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.approach-stat { height: auto; min-height: 38px; padding: 5px 7px; display: grid; grid-template-columns: auto 1fr; align-items: center; row-gap: 2px; border-radius: 9px; border-left: 3px solid #ff6c72; }
+.approach-stat.green { border-left-color: #48e0a0; }
+.approach-stat.yellow { border-left-color: #ffd165; }
+.approach-stat span { font-weight: 800; color: #d0dae7; }
+.approach-stat strong { justify-self: end; font-size: 9px; }
+.approach-stat em { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; color: #7f90a6; font-size: 7px; font-style: normal; }
+.car-turn { position: absolute; z-index: 4; width: 4px; height: 4px; border-radius: 50%; background: #ffb020; box-shadow: 0 0 5px 2px #ffb02099; animation: turn-blink .6s steps(2, start) infinite; }
+@keyframes turn-blink { to { opacity: .15; } }
+.heading-south.turn-left .car-turn { bottom: -2px; right: -2px; }
+.heading-south.turn-right .car-turn { bottom: -2px; left: -2px; }
+.heading-north.turn-left .car-turn { top: -2px; left: -2px; }
+.heading-north.turn-right .car-turn { top: -2px; right: -2px; }
+.heading-east.turn-left .car-turn { right: -2px; top: -2px; }
+.heading-east.turn-right .car-turn { right: -2px; bottom: -2px; }
+.heading-west.turn-left .car-turn { left: -2px; bottom: -2px; }
+.heading-west.turn-right .car-turn { left: -2px; top: -2px; }
