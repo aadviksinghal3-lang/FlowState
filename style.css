@@ -237,7 +237,7 @@ button { font: inherit; }
 .metric-tile strong { color: var(--accent); font-size: 13px; line-height: 1; }
 .metric-tile:nth-child(2) strong { color: var(--amber); }
 .progress-track { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 99px; background: #1b2a3e; }
-.progress-track span { display: block; width: 0; height: 100%; background: var(--accent); border-radius: inherit; transition: width .25s; }
+.progress-track span { display: block; width: 0; height: 100%; background: var(--accent); border-radius: inherit; }
 .card-footer { min-height: 16px; color: #91a0b2; font-size: 8px; font-weight: 700; }
 
 .bottom-bar { min-height: 18px; margin-top: 7px; color: #9aa9bc; font-size: 8px; font-weight: 700; }
