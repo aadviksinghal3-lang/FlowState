@@ -35,9 +35,10 @@
   const CYCLE_ORDER_BY_NEED = 1;          // 1 = serve the road with the biggest planned green first, 0 = N,E,S,W rotation
   const CYCLE_GAP_OUT_AFTER = 2;          // an emptied road ends its green early after this many seconds
   const CYCLE_EMERGENCY_GREEN = 8;
-  const PREEMPT_MIN_GAP = 30;             // another road must have this many more cars...
-  const PREEMPT_RATIO = 3;                // ...and at least this multiple of the green road's queue
-  const PREEMPT_PERSIST = 1;              // ...for this many seconds before the green is cut short
+  const PREEMPT_MIN_GAP = 3;              // another road must have at least this many MORE cars (1-2 more or equal: keep green)...
+  const PREEMPT_RATIO = 1;                // ...and at least this multiple of the green road's queue (1 = no extra condition)
+  const PREEMPT_MIN_GREEN = 10;           // never switch because of a queue difference before this much green
+  const PREEMPT_PERSIST = 0.5;            // ...for this many seconds before the green is cut short
   const EMPTY_STAT = { count: 0, wait: 0, max: 0, pressure: 0, rate: 0, predicted: 0 };
   // Vehicle paths in % of the intersection box. Each road has its own lane; cars drive on the right.
   const LANE_START = { N: [46, 27], S: [54, 71], W: [37, 54], E: [63, 46] };
@@ -516,7 +517,7 @@
     // Preemption: if another road has far more cars, cut this green short (yellow first) even though
     // some cars here are still waiting. They stay in the queue and get a turn in the new cycle.
     let rival = null;
-    if (run.greenElapsed >= ADAPTIVE_MIN_GREEN) {
+    if (run.greenElapsed >= PREEMPT_MIN_GREEN) {
       for (const phase of PHASES) {
         if (phase === current) continue;
         const count = stats[phase].count;
