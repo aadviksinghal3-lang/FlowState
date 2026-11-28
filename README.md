@@ -22,6 +22,7 @@ lets viewers immediately compare the adaptive response with the fixed plan.
   metrics, emergency requests, and charts
 - `tune_planner.js` — random-search tuner for the cycle planner constants
 - `compare_scenarios.js` — compares fixed and adaptive control on all 9 scenario/demand cases
+- `check_rule.js` — checks the 3-car switching rule and 10 s minimum green
 - `sim_loader.js` — runs the real simulator headlessly for the two scripts above
 - `.nojekyll` — tells GitHub Pages to serve the project without Jekyll
 
@@ -100,13 +101,15 @@ seconds of green**:
   **extended in 12 s steps** (e.g. 20 s to 32 s) as long as at least one car is still
   waiting. The decision line reports it, for example "W still has 9 cars: green
   extended 20s → 32s... Red time +12s on N, E".
-- **Preemption:** if another road has at least 30 more cars and at least 3x the
-  green road's queue for 1 second (after the 6 s minimum green), the green road
-  gets yellow and the busy road gets green even though the first road is not clear.
-  Its leftover cars wait for their turn in the new cycle plan. Eager settings (8 more
-  cars, 2x) fired about 7 times per run and made mean wait 3 seconds worse and the
-  worst-case wait 28 seconds longer, so the tuned threshold is high and fires about
-  once every two runs (`PREEMPT_*` in `script.js`; lower them for more reactive switching).
+- **Switching rule (preemption):** while a road is green, the controller compares it
+  with the other roads. If another road has **1-2 more cars, or the same number, the
+  green stays**. If another road has **3 or more more cars**, the green road gets yellow and
+  that road gets green **once the 10-second minimum green is over**, even if the first road
+  is not clear. If the green road becomes empty it ends after a 2-second gap-out and
+  yellow. Its leftover cars wait for their turn in the new cycle plan. The thresholds are
+  constants in `script.js` (`PREEMPT_MIN_GAP`, `PREEMPT_MIN_GREEN`). A much higher threshold
+  (+30 cars) gives lower mean wait (28.1 s vs 31.9 s) but lets a big queue wait while a
+  small road stays green, so the visible rule above is used.
 - A road whose queue empties ends its green after 3 s of nothing and returns the
   unused seconds to the other roads. Each cycle starts with the road that has the
   biggest planned green, and every road that has cars gets a turn in that cycle.
@@ -172,20 +175,27 @@ on the test seeds (28.5 s to 27.7 s mean wait, 162.4 to 163.5 cars cleared).
 
 | Scenario / demand | Fixed wait | Adaptive wait | Fixed cleared | Adaptive cleared | Wait saved | Extra cars |
 |---|---|---|---|---|---|---|
-| Morning rush / Low | 38.2s | 13.4s | 122.4 | 145.4 | 65% | +23.0 |
-| Morning rush / Medium | 43.6s | 21.8s | 136.4 | 165.1 | 50% | +28.8 |
-| Morning rush / High | 50.3s | 36.7s | 146.9 | 169.9 | 27% | +23.0 |
-| Balanced flow / Low | 41.2s | 13.2s | 121.1 | 144.6 | 68% | +23.5 |
-| Balanced flow / Medium | 46.1s | 21.6s | 134.5 | 165.4 | 53% | +30.9 |
-| Balanced flow / High | 51.9s | 37.1s | 150.6 | 171.3 | 29% | +20.6 |
-| Event surge / Low | 45.8s | 17.4s | 127.1 | 161.8 | 62% | +34.6 |
-| Event surge / Medium | 56.2s | 36.8s | 141.9 | 168.9 | 35% | +27.0 |
-| Event surge / High | 63.6s | 51.9s | 151.5 | 168.9 | 18% | +17.4 |
-| **All 9 (average)** | 48.5s | 27.8s | 136.9 | 162.3 | 43% | +25.4 |
+| Morning rush / Low | 38.2s | 14.7s | 122.4 | 145.1 | 61% | +22.8 |
+| Morning rush / Medium | 43.6s | 26.5s | 136.4 | 156.3 | 39% | +19.9 |
+| Morning rush / High | 50.3s | 42.2s | 146.9 | 158.4 | 16% | +11.5 |
+| Balanced flow / Low | 41.2s | 15.0s | 121.1 | 144.5 | 64% | +23.4 |
+| Balanced flow / Medium | 46.1s | 26.6s | 134.5 | 156.8 | 42% | +22.3 |
+| Balanced flow / High | 51.9s | 43.9s | 150.6 | 156.5 | 15% | +5.9 |
+| Event surge / Low | 45.8s | 20.9s | 127.1 | 156.3 | 54% | +29.1 |
+| Event surge / Medium | 56.2s | 42.2s | 141.9 | 157.5 | 25% | +15.6 |
+| Event surge / High | 63.6s | 56.9s | 151.5 | 157.5 | 11% | +6.0 |
+| **All 9 (average)** | 48.5s | 32.1s | 136.9 | 154.3 | 34% | +17.4 |
 
-Adaptive control wins in all nine scenarios: on average 43% less mean wait and about 25
-more cars cleared (+18%), with 41 cars still queued at the end versus 66 for the fixed
-timer. The margin is largest at low and medium demand and smallest in the saturated "Event
-surge / High" case, where the road is over capacity for any signal plan. In 36 checked runs
-planned green never exceeded 60 s per cycle and no green started on an empty road.
+Adaptive control wins in all nine scenarios: on average 34% less mean wait and about 17
+more cars cleared (+13%), with 50 cars still queued at the end versus 66 for the fixed
+timer. The margin is largest at low and medium demand and smallest in the saturated "High"
+cases, where the road is over capacity for any signal plan. In 36 checked runs planned green
+never exceeded 60 s per cycle and no green started on an empty road. `check_rule.js`
+confirms (318 rule-based switches in 36 runs) that no queue-based switch happened before 10 s
+of green, that the green never stayed on for more than about half a second after another road
+had 3+ more cars, and that a 0-2 car difference kept the green.
 
+**Switching-threshold tradeoff** (seeds 401-406): switch at +3 cars (shipped) 31.9 s mean
+wait / 156.2 cars cleared / 101 s longest wait; switch at +30 cars 28.1 s / 163.4 cars / 81 s;
+fixed timer 48.3 s / 137.8 cars. Re-tuning the other constants around the +3 rule changed
+mean wait by less than 0.3 s, so the threshold is what decides the result.
